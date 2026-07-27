@@ -225,14 +225,14 @@ html, body {
         .attr('x', plotW / 2)
         .attr('y', plotH + 40)
         .attr('text-anchor', 'middle')
-        .text('normalized_ITM')
+        .text('ITM')
 
       g.append('text')
         .attr('x', -plotH / 2)
         .attr('y', -45)
         .attr('transform', 'rotate(-90)')
         .attr('text-anchor', 'middle')
-        .text('normalized_ITC')
+        .text('ITC')
 
       g.append('rect')
         .attr('width', plotW)
@@ -289,8 +289,8 @@ html, body {
       .map(([sn, d]) => ({
         sn,
         text: String(d?.text ?? ''),
-        x: clamp01(+d?.normalized_ITM),
-        y: clamp01(+d?.normalized_ITC),
+        x: clamp01(+d?.ITM),
+        y: clamp01(+d?.ITC),
         url: String(d?.url ?? '')
       }))
       .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
