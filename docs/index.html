@@ -1,1 +1,382 @@
-<html><body>hello world</body></html>
+
+<html>
+<head>
+<style>
+
+html, body {
+  margin: 0;
+}
+
+#container {
+  height: min(100dvh, 100dvw);
+  width: min(100dvh, 100dvw);
+}
+#outer-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+}
+  
+.progress-div {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3em;
+  background: white;
+  text-align: center;
+  font-size: 3em;
+}
+
+
+</style>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+  <div id="outer-container">
+    <div id="container"></div>
+  </div>
+
+<script>
+(function() {
+  const dataUrl = 'itm-itc-graph-data-0.json'
+  // const dataUrl = 'itm-itc-graph-data.json'
+  const container = document.getElementById('container')
+
+  function getSize() {
+    const { width, height } = container.getBoundingClientRect()
+    return { width: Math.max(1, width), height: Math.max(1, height) }
+  }
+
+  const margin = { top: 20, right: 20, bottom: 50, left: 60 }
+  const imgSize = 240
+  const r = 4
+
+  // ===== SCALE STUBS (edit here) =====
+  const SCALE = {
+    x: {
+      type: 'linear', // 'linear' | 'log' | 'symlog' | 'pow' | 'sqrt'
+      base: 10,       // for log
+      constant: 1,    // for symlog
+      exponent: 2,    // for pow
+      nice: true,
+      clamp: true,
+      domain: { mode: 'extent', fixed: null, padFrac: 0.00 } // mode: 'extent'|'fixed'
+    },
+    y: {
+      type: 'pow',
+      base: 10,
+      constant: 1,
+      exponent: -2,
+      nice: true,
+      clamp: true,
+      domain: { mode: 'extent', fixed: null, padFrac: 0.00 }
+    }
+  }
+
+  const X_VALUE = d => d.x
+  const Y_VALUE = d => d.y
+  const X_SANITIZE = v => v
+  const Y_SANITIZE = v => v
+
+  function makeScale(cfg, domain, range) {
+    let s
+    switch (cfg.type) {
+      case 'log':
+        s = d3.scaleLog().base(cfg.base ?? 10)
+        break
+      case 'symlog':
+        s = d3.scaleSymlog().constant(cfg.constant ?? 1)
+        break
+      case 'pow':
+        s = d3.scalePow().exponent(cfg.exponent ?? 2)
+        break
+      case 'sqrt':
+        s = d3.scaleSqrt()
+        break
+      case 'linear':
+      default:
+        s = d3.scaleLinear()
+        break
+    }
+    s.domain(domain).range(range)
+    if (cfg.clamp) s.clamp(true)
+    if (cfg.nice && s.nice) s.nice()
+    return s
+  }
+
+  function computeDomain(entries, cfg, valueFn, sanitizeFn) {
+    if (cfg.domain?.mode === 'fixed' && Array.isArray(cfg.domain.fixed)) {
+      return cfg.domain.fixed
+    }
+    const vals = entries
+      .map(valueFn)
+      .map(sanitizeFn)
+      .filter(v => Number.isFinite(v))
+
+    let ext = d3.extent(vals)
+    let [lo, hi] = ext
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 1]
+
+    const padFrac = cfg.domain?.padFrac ?? 0
+    const span = hi - lo
+    const pad = span * padFrac || 0
+    lo -= pad
+    hi += pad
+
+    // For log: ensure domain strictly > 0
+    if (cfg.type === 'log') {
+      const eps = 1e-12
+      lo = Math.max(lo, eps)
+      hi = Math.max(hi, lo * (1 + eps))
+    }
+
+    return [lo, hi]
+  }
+
+  // Optional tick formatting stubs per scale type
+  function tickFormatFor(cfg) {
+    if (cfg.type === 'log') return d3.format('~g')
+    return d3.format('.1f')
+  }
+  // ===== END SCALE STUBS =====
+
+  main().catch(err => {
+    console.error(err)
+    container.textContent = `Error: ${err?.message || String(err)}`
+  })
+
+  function getJSON(url) {
+    return new Promise((resolve, reject) => {
+      const r = new XMLHttpRequest()
+      const progressDiv = document.createElement('div')
+      progressDiv.classList.add('progress-div')
+      document.body.append(progressDiv)
+
+      r.onload = () => {
+        progressDiv.remove()
+        try {
+          resolve(JSON.parse(r.response))
+        } catch (e) {
+          reject(e)
+        }
+      }
+
+      r.addEventListener('progress', e => {
+        const rate = e.timeStamp / e.loaded
+        const ETA = rate * (e.total - e.loaded) / 1000
+        const remaining = `${(ETA / 60).toFixed(0)}m ${(ETA % 60).toFixed(0)}s`
+        progressDiv.innerHTML =
+          `loading ${(100 * e.loaded / e.total).toFixed(2)}% <br/>${remaining} left<br/>(this only needs to run once)`
+      })
+
+      r.addEventListener('error', () => reject(new Error('error loading data')))
+      r.addEventListener('abort', () => reject(new Error('data load aborted')))
+
+      r.open('GET', url)
+      r.send()
+    })
+  }
+
+  async function main() {
+    const raw = await getJSON(dataUrl)
+    const entries = normalize(raw)
+
+    const svg = d3.select(container)
+      .append('svg')
+      .style('width', '100%')
+      .style('height', '100%')
+      .style('font-family', 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif')
+      .style('font-size', '12px')
+      .attr('preserveAspectRatio', 'none')
+
+    const tooltip = createTooltip()
+
+    function render() {
+      const { width, height } = getSize()
+      svg.attr('viewBox', `0 0 ${width} ${height}`)
+      svg.selectAll('*').remove()
+
+      const plotW = width - margin.left - margin.right
+      const plotH = height - margin.top - margin.bottom
+
+      const g = svg.append('g')
+        .attr('transform', `translate(${margin.left},${margin.top})`)
+
+      // ===== NEW: build scales via stubs =====
+      const xDomain = computeDomain(entries, SCALE.x, X_VALUE, X_SANITIZE)
+      const yDomain = computeDomain(entries, SCALE.y, Y_VALUE, Y_SANITIZE)
+
+      const xScale = makeScale(SCALE.x, xDomain, [0, plotW])
+      const yScale = makeScale(SCALE.y, yDomain, [plotH, 0])
+      console.log(plotH)
+      // ===== END NEW =====
+
+      g.append('g')
+        .attr('transform', `translate(0,${plotH})`)
+        .call(d3.axisBottom(xScale).ticks(10).tickFormat(tickFormatFor(SCALE.x)))
+
+      g.append('g')
+        .call(d3.axisLeft(yScale).ticks(10).tickFormat(tickFormatFor(SCALE.y)))
+
+      g.append('text')
+        .attr('x', plotW / 2)
+        .attr('y', plotH + 40)
+        .attr('text-anchor', 'middle')
+        .text('normalized_ITM')
+
+      g.append('text')
+        .attr('x', -plotH / 2)
+        .attr('y', -45)
+        .attr('transform', 'rotate(-90)')
+        .attr('text-anchor', 'middle')
+        .text('normalized_ITC')
+
+      g.append('rect')
+        .attr('width', plotW)
+        .attr('height', plotH)
+        .attr('fill', 'transparent')
+      
+      g.append('g')
+        .selectAll('circle')
+        .data(entries)
+        .enter()
+        .append('circle')
+        .attr('cx', d => xScale(X_SANITIZE(X_VALUE(d))))
+        .attr('cy', d => {
+          // console.log(Y_VALUE(d), Y_SANITIZE(Y_VALUE(d)));
+          // return yScale(Y_SANITIZE(Y_VALUE(d)));
+          return (1-Y_SANITIZE(Y_VALUE(d))) * plotH;
+        })
+        .attr('r', 1)
+        .attr('opacity', 0.75)
+        .on('mouseenter', (event, d) => {
+          tooltip.style('display', 'block')
+          tooltip.html(renderTooltipHtml(d, imgSize))
+          positionTooltip(tooltip, event)
+        })
+        .on('mousemove', event => positionTooltip(tooltip, event))
+        .on('mouseleave', () => tooltip.style('display', 'none'))
+        .on('click', (event, d) => {
+          const url = `https://tsdr.uspto.gov/#caseNumber=${d.sn}&caseSearchType=US_APPLICATION&caseType=DEFAULT&searchType=statusSearch`;
+          window.open(url, '_blank');
+        })
+    }
+
+    render()
+    window.addEventListener('resize', render)
+  }
+
+  function createTooltip() {
+    return d3.select('body')
+      .append('div')
+      .style('position', 'fixed')
+      .style('pointer-events', 'none')
+      .style('z-index', '9999')
+      .style('max-width', '420px')
+      .style('display', 'none')
+      .style('background', 'rgba(255,255,255,0.98)')
+      .style('border', '1px solid rgba(0,0,0,0.2)')
+      .style('border-radius', '8px')
+      .style('box-shadow', '0 8px 28px rgba(0,0,0,0.18)')
+      .style('padding', '10px')
+  }
+
+  function normalize(raw) {
+    return Object.entries(raw || {})
+      .map(([sn, d]) => ({
+        sn,
+        text: String(d?.text ?? ''),
+        x: clamp01(+d?.normalized_ITM),
+        y: clamp01(+d?.normalized_ITC),
+        url: String(d?.url ?? '')
+      }))
+      .filter(d => Number.isFinite(d.x) && Number.isFinite(d.y))
+  }
+
+  function renderTooltipHtml(d, size) {
+    const safeText = escapeHtml(d.text)
+    const safeSn = escapeHtml(d.sn)
+    const itm = format01(d.x)
+    const itc = format01(d.y)
+    const imgUrl = withSizeParam(d.url, size)
+
+    return `
+      <div style="display:flex; gap:10px; align-items:flex-start;">
+        <div style="flex:0 0 auto;">
+          <img
+            src="${escapeAttr(imgUrl)}"
+            style="max-width:${size}px; max-height:${size}px; border-radius:6px; border:1px solid rgba(0,0,0,0.12);"
+            loading="lazy"
+          />
+        </div>
+        <div style="flex:1 1 auto; min-width:0;">
+          <div style="font-weight:600; margin-bottom:6px;">SN: ${safeSn}</div>
+          <div style="margin-bottom:8px; white-space:pre-wrap; overflow-wrap:anywhere;">${safeText}</div>
+          <div style="display:flex; gap:12px;">
+            <div><span style="opacity:0.7;">ITM:</span> ${itm}</div>
+            <div><span style="opacity:0.7;">ITC:</span> ${itc}</div>
+          </div>
+        </div>
+      </div>
+    `
+  }
+
+  function positionTooltip(tooltip, event) {
+    const pad = 14
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+
+    const rect = tooltip.node().getBoundingClientRect()
+    let x = event.clientX + pad
+    let y = event.clientY + pad
+
+    if (x + rect.width + pad > vw) x = event.clientX - rect.width - pad
+    if (y + rect.height + pad > vh) y = event.clientY - rect.height - pad
+
+    x = clamp(x, pad, vw - rect.width - pad)
+    y = clamp(y, pad, vh - rect.height - pad)
+
+    tooltip.style('left', `${x}px`).style('top', `${y}px`)
+  }
+
+  function withSizeParam(url, n) {
+    if (!url) return ''
+    const sep = url.includes('?') ? '&' : '?'
+    return `${url}${sep}size=${encodeURIComponent(String(n))}`
+  }
+
+  function format01(v) {
+    return Number.isFinite(v) ? v.toFixed(3) : 'NaN'
+  }
+
+  function clamp01(v) {
+    if (!Number.isFinite(v)) return NaN
+    if (v < 0) return 0
+    if (v > 1) return 1
+    return v
+  }
+
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v))
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;')
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replaceAll('`', '&#96;')
+  }
+})()
+</script>
+
+</body>
+</html>
